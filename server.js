@@ -11,52 +11,109 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
+
 const SESSION_TTL_MS = 60 * 1000;
 
-const DESTINATION_URL = "https://www.whitepixeltechnologies.in/";
 const PUBLIC_BASE_URL =
-  process.env.PUBLIC_BASE_URL || "https://web-linking.onrender.com";
+  process.env.PUBLIC_BASE_URL ||
+  "https://web-linking.onrender.com";
+
+const DESTINATION_URL =
+  "https://www.whitepixeltechnologies.in/";
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+
+app.use(
+  express.static(
+    path.join(__dirname, "public")
+  )
+);
+
+/*
+==================================================
+SESSION STORAGE
+==================================================
+*/
 
 const sessions = new Map();
 
-function getLocalIP() {
-  const nets = os.networkInterfaces();
+/*
+==================================================
+LOCAL IP
+==================================================
+*/
 
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === "IPv4" && !net.internal) {
-        return net.address;
+function getLocalIP() {
+
+  const networks = os.networkInterfaces();
+
+  for (const name of Object.keys(networks)) {
+
+    for (const network of networks[name]) {
+
+      if (
+        network.family === "IPv4" &&
+        !network.internal
+      ) {
+        return network.address;
       }
+
     }
   }
 
   return null;
 }
 
-async function createSession(webSocketId) {
-  const sessionId = crypto.randomUUID();
-  const expiresAt = Date.now() + SESSION_TTL_MS;
+/*
+==================================================
+CREATE QR SESSION
+==================================================
+*/
 
-  const linkUrl = `${PUBLIC_BASE_URL}/link/${sessionId}`;
+async function createSession(socketId) {
 
-  const qrDataUrl = await QRCode.toDataURL(linkUrl, {
-    margin: 1,
-    width: 320,
-    color: {
-      dark: "#0B1B2B",
-      light: "#EDE7D9"
+  const sessionId =
+    crypto.randomUUID();
+
+  const expiresAt =
+    Date.now() + SESSION_TTL_MS;
+
+  /*
+  The QR contains the actual session ID.
+  */
+
+  const linkUrl =
+    `${PUBLIC_BASE_URL}/link/${sessionId}`;
+
+  const qrDataUrl =
+    await QRCode.toDataURL(
+      linkUrl,
+      {
+        margin: 1,
+        width: 320,
+
+        color: {
+          dark: "#0B1B2B",
+          light: "#EDE7D9"
+        }
+      }
+    );
+
+  sessions.set(
+    sessionId,
+    {
+      socketId: socketId,
+
+      createdAt:
+        Date.now(),
+
+      expiresAt:
+        expiresAt,
+
+      status:
+        "pending"
     }
-  });
-
-  sessions.set(sessionId, {
-    status: "pending",
-    expiresAt,
-    webSocketId,
-    linkUrl
-  });
+  );
 
   return {
     sessionId,
@@ -65,292 +122,878 @@ async function createSession(webSocketId) {
   };
 }
 
-/* =========================
-   DESKTOP / BRIDGE
-========================= */
+/*
+==================================================
+DESKTOP QR CONSOLE
+==================================================
+*/
 
-io.on("connection", (socket) => {
-  let currentSessionId = null;
-  let rotateTimer = null;
+io.on(
+  "connection",
+  (socket) => {
 
-  async function issueNewSession() {
-    // 1. Clear any running timer first to prevent memory leaks and premature deletion
-    if (rotateTimer) {
-      clearTimeout(rotateTimer);
-      rotateTimer = null;
-    }
+    let currentSessionId =
+      null;
 
-    // 2. Clean up previous session room & memory
-    if (currentSessionId) {
-      socket.leave(currentSessionId);
-      sessions.delete(currentSessionId);
-      currentSessionId = null;
-    }
+    let rotationTimer =
+      null;
 
-    if (!socket.connected) return;
+    /*
+    ----------------------------------------------
+    GENERATE NEW QR
+    ----------------------------------------------
+    */
 
-    // 3. Create new session
-    const { sessionId, qrDataUrl, expiresAt } = await createSession(socket.id);
-    currentSessionId = sessionId;
+    async function generateNewQR() {
 
-    // 4. Join Socket.IO Room for this session ID
-    socket.join(sessionId);
+      /*
+      Remove previous QR.
+      */
 
-    socket.emit("session", {
-      sessionId,
-      qrDataUrl,
-      expiresAt
-    });
+      if (currentSessionId) {
 
-    // 5. Set expiration timer
-    rotateTimer = setTimeout(async () => {
-      if (currentSessionId === sessionId) {
-        sessions.delete(sessionId);
-        socket.leave(sessionId);
-        currentSessionId = null;
-        await issueNewSession();
+        sessions.delete(
+          currentSessionId
+        );
+
+        currentSessionId =
+          null;
       }
-    }, SESSION_TTL_MS);
-  }
 
-  socket.on("start", async () => {
-    await issueNewSession();
-  });
+      /*
+      Stop previous timer.
+      */
 
-  socket.on("unlink", () => {
-    if (rotateTimer) clearTimeout(rotateTimer);
-    if (currentSessionId) {
-      socket.leave(currentSessionId);
-      sessions.delete(currentSessionId);
-      currentSessionId = null;
+      if (rotationTimer) {
+
+        clearTimeout(
+          rotationTimer
+        );
+
+        rotationTimer =
+          null;
+      }
+
+      /*
+      Create new session.
+      */
+
+      const result =
+        await createSession(
+          socket.id
+        );
+
+      currentSessionId =
+        result.sessionId;
+
+      /*
+      Send QR to browser.
+      */
+
+      socket.emit(
+        "session",
+        {
+          sessionId:
+            result.sessionId,
+
+          qrDataUrl:
+            result.qrDataUrl,
+
+          expiresAt:
+            result.expiresAt
+        }
+      );
+
+      /*
+      --------------------------------------------
+      AUTOMATIC 60 SECOND ROTATION
+      --------------------------------------------
+      */
+
+      rotationTimer =
+        setTimeout(
+          async () => {
+
+            /*
+            Delete old QR.
+            */
+
+            sessions.delete(
+              result.sessionId
+            );
+
+            /*
+            Generate new QR.
+            */
+
+            await generateNewQR();
+
+          },
+          SESSION_TTL_MS
+        );
     }
-  });
 
-  socket.on("disconnect", () => {
-    if (rotateTimer) clearTimeout(rotateTimer);
-    if (currentSessionId) {
-      sessions.delete(currentSessionId);
-      currentSessionId = null;
+    /*
+    ----------------------------------------------
+    START
+    ----------------------------------------------
+    */
+
+    socket.on(
+      "start",
+      async () => {
+
+        try {
+
+          await generateNewQR();
+
+        } catch (error) {
+
+          console.error(
+            "QR generation error:",
+            error
+          );
+
+        }
+
+      }
+    );
+
+    /*
+    ----------------------------------------------
+    MANUAL NEW QR
+    ----------------------------------------------
+    */
+
+    socket.on(
+      "newQR",
+      async () => {
+
+        try {
+
+          await generateNewQR();
+
+        } catch (error) {
+
+          console.error(
+            "New QR error:",
+            error
+          );
+
+        }
+
+      }
+    );
+
+    /*
+    ----------------------------------------------
+    DISCONNECT
+    ----------------------------------------------
+    */
+
+    socket.on(
+      "disconnect",
+      () => {
+
+        if (rotationTimer) {
+
+          clearTimeout(
+            rotationTimer
+          );
+
+        }
+
+        if (currentSessionId) {
+
+          sessions.delete(
+            currentSessionId
+          );
+
+        }
+
+      }
+    );
+
+  }
+);
+
+/*
+==================================================
+MOBILE QR PAGE
+==================================================
+*/
+
+app.get(
+  "/link/:sessionId",
+  (req, res) => {
+
+    const sessionId =
+      req.params.sessionId;
+
+    const session =
+      sessions.get(
+        sessionId
+      );
+
+    /*
+    QR does not exist.
+    */
+
+    if (!session) {
+
+      return res
+        .status(410)
+        .send(
+          mobilePage(
+            "expired"
+          )
+        );
+
     }
-  });
-});
 
-/* =========================
-   MOBILE QR PAGE
-========================= */
+    /*
+    QR expired.
+    */
 
-app.get("/link/:sessionId", (req, res) => {
-  const session = sessions.get(req.params.sessionId);
+    if (
+      Date.now() >=
+      session.expiresAt
+    ) {
 
-  if (!session) {
-    return res.status(410).send(phonePage("expired"));
+      sessions.delete(
+        sessionId
+      );
+
+      return res
+        .status(410)
+        .send(
+          mobilePage(
+            "expired"
+          )
+        );
+
+    }
+
+    /*
+    QR already used.
+    */
+
+    if (
+      session.status ===
+      "used"
+    ) {
+
+      return res.send(
+        mobilePage(
+          "used"
+        )
+      );
+
+    }
+
+    /*
+    Valid QR.
+    */
+
+    return res.send(
+      mobilePage(
+        "confirm",
+        sessionId
+      )
+    );
+
   }
+);
 
-  if (Date.now() > session.expiresAt) {
-    sessions.delete(req.params.sessionId);
-    return res.status(410).send(phonePage("expired"));
-  }
+/*
+==================================================
+LINK DEVICE BUTTON
+==================================================
+*/
 
-  if (session.status === "used") {
-    return res.send(phonePage("used"));
-  }
+app.post(
+  "/link/:sessionId/confirm",
+  (req, res) => {
 
-  return res.send(phonePage("confirm", req.params.sessionId));
-});
+    const sessionId =
+      req.params.sessionId;
 
-/* =========================
-   LINK BUTTON
-========================= */
+    const session =
+      sessions.get(
+        sessionId
+      );
 
-app.post("/link/:sessionId/confirm", (req, res) => {
-  const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
+    /*
+    QR not found.
+    */
 
-  if (!session) {
-    return res.status(410).json({
-      ok: false,
-      error: "expired"
+    if (!session) {
+
+      return res
+        .status(410)
+        .json({
+          ok: false,
+          error: "expired"
+        });
+
+    }
+
+    /*
+    QR expired.
+    */
+
+    if (
+      Date.now() >=
+      session.expiresAt
+    ) {
+
+      sessions.delete(
+        sessionId
+      );
+
+      return res
+        .status(410)
+        .json({
+          ok: false,
+          error: "expired"
+        });
+
+    }
+
+    /*
+    Already used.
+    */
+
+    if (
+      session.status !==
+      "pending"
+    ) {
+
+      return res
+        .status(409)
+        .json({
+          ok: false,
+          error: "already_used"
+        });
+
+    }
+
+    /*
+    Mark this QR as used.
+    */
+
+    session.status =
+      "used";
+
+    /*
+    Tell desktop console.
+    */
+
+    io.to(
+      session.socketId
+    ).emit(
+      "linked",
+      {
+        sessionId:
+          sessionId,
+
+        time:
+          Date.now()
+      }
+    );
+
+    /*
+    Tell mobile everything is okay.
+    */
+
+    return res.json({
+      ok: true
     });
+
   }
+);
 
-  if (Date.now() > session.expiresAt) {
-    sessions.delete(sessionId);
+/*
+==================================================
+MOBILE PAGE
+==================================================
+*/
 
-    return res.status(410).json({
-      ok: false,
-      error: "expired"
-    });
-  }
+function mobilePage(
+  state,
+  sessionId
+) {
 
-  if (session.status !== "pending") {
-    return res.status(409).json({
-      ok: false,
-      error: "already_used"
-    });
-  }
+  const html = `
 
-  session.status = "used";
-
-  // Emit event to the socket room named after the sessionId
-  io.to(sessionId).emit("linked", {
-    sessionId: sessionId,
-    linkedAt: Date.now()
-  });
-
-  return res.json({
-    ok: true
-  });
-});
-
-/* =========================
-   MOBILE PAGE
-========================= */
-
-function phonePage(state, sessionId) {
-  const shell = (content) => `
 <!DOCTYPE html>
-<html lang="en">
+
+<html>
+
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<meta
+name="viewport"
+content="width=device-width, initial-scale=1.0"
+>
+
 <title>Sealine</title>
+
 <style>
+
+* {
+  box-sizing: border-box;
+}
+
 body {
+
   margin: 0;
+
   min-height: 100vh;
+
   display: flex;
+
   align-items: center;
+
   justify-content: center;
-  background: radial-gradient(120% 140% at 50% -10%, #123447 0%, #0B1B2B 45%, #071320 100%);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  padding: 20px;
+
+  font-family:
+    Arial,
+    sans-serif;
+
+  background:
+    radial-gradient(
+      circle at top,
+      #123447,
+      #071320 70%
+    );
+
   color: #EDE7D9;
-  padding: 24px;
 }
+
 .card {
-  max-width: 360px;
+
   width: 100%;
+
+  max-width: 370px;
+
+  padding: 32px 25px;
+
   text-align: center;
-  background: rgba(237,231,217,0.05);
-  border: 1px solid rgba(237,231,217,0.14);
+
   border-radius: 18px;
-  padding: 34px 26px;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.05
+    );
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.15
+    );
+
 }
+
 .eyebrow {
-  font-size: 11px;
-  letter-spacing: .18em;
-  text-transform: uppercase;
+
   color: #E3B23C;
-  margin-bottom: 10px;
+
+  font-size: 11px;
+
+  letter-spacing: 3px;
+
+  text-transform: uppercase;
+
+  margin-bottom: 15px;
+
 }
-.badge {
+
+.icon {
+
   width: 60px;
+
   height: 60px;
-  margin: 0 auto 18px;
-  border-radius: 50%;
+
+  margin: auto;
+
+  margin-bottom: 18px;
+
   display: flex;
+
   align-items: center;
+
   justify-content: center;
+
+  border-radius: 50%;
+
+  border:
+    1px solid
+    #C9A227;
+
   font-size: 26px;
+
 }
+
 h1 {
-  font-size: 19px;
-  margin: 0 0 8px;
-  font-weight: 600;
+
+  font-size: 20px;
+
+  margin:
+    0 0 10px;
+
 }
+
 p {
-  font-size: 13.5px;
-  color: rgba(237,231,217,0.65);
-  line-height: 1.5;
-  margin: 0 0 22px;
-}
-button {
-  width: 100%;
-  padding: 13px;
-  border-radius: 10px;
-  border: 1px solid #C9A227;
-  background: #C9A227;
-  color: #071320;
-  font-weight: 600;
+
   font-size: 14px;
+
+  line-height: 1.5;
+
+  color:
+    rgba(
+      237,
+      231,
+      217,
+      0.7
+    );
+
+  margin-bottom: 24px;
+
 }
+
+button {
+
+  width: 100%;
+
+  padding: 14px;
+
+  border: none;
+
+  border-radius: 10px;
+
+  background:
+    #C9A227;
+
+  color:
+    #071320;
+
+  font-size: 15px;
+
+  font-weight: bold;
+
+}
+
 button:disabled {
-  opacity: 0.5;
+
+  opacity: 0.6;
+
 }
+
 </style>
+
 </head>
+
 <body>
+
 <div class="card">
-${content}
+
+${getMobileContent(
+  state,
+  sessionId
+)}
+
 </div>
+
 </body>
+
 </html>
+
 `;
 
-  if (state === "confirm") {
-    return shell(`
-<div class="eyebrow">Handset</div>
-<div class="badge" style="border:1px solid #C9A227;color:#E3B23C;">🔗</div>
-<h1>Continue</h1>
-<p>Tap the button below to continue.</p>
-<button id="confirmBtn" onclick="continueToWebsite()">Link Device</button>
+  return html;
+}
+
+/*
+==================================================
+MOBILE CONTENT
+==================================================
+*/
+
+function getMobileContent(
+  state,
+  sessionId
+) {
+
+  /*
+  ----------------------------------------------
+  VALID QR
+  ----------------------------------------------
+  */
+
+  if (
+    state ===
+    "confirm"
+  ) {
+
+    return `
+
+<div class="eyebrow">
+  Handset
+</div>
+
+<div class="icon">
+  🔗
+</div>
+
+<h1>
+  Link Device
+</h1>
+
+<p>
+  Tap the button below to continue.
+</p>
+
+<button
+  id="linkButton"
+  onclick="linkDevice()"
+>
+  Link Device
+</button>
+
 <script>
-async function continueToWebsite() {
-  const btn = document.getElementById("confirmBtn");
-  btn.disabled = true;
-  btn.textContent = "Your account is linking...";
+
+async function linkDevice() {
+
+  const button =
+    document.getElementById(
+      "linkButton"
+    );
+
+  button.disabled =
+    true;
+
+  button.textContent =
+    "Your account is linking...";
 
   try {
-    const response = await fetch("/link/${sessionId}/confirm", { method: "POST" });
-    const data = await response.json();
 
-    if (!data.ok) {
-      btn.disabled = false;
-      btn.textContent = "Link Device";
-      alert("QR code expired. Please scan the latest QR code.");
+    const response =
+      await fetch(
+        "/link/${sessionId}/confirm",
+        {
+          method: "POST"
+        }
+      );
+
+    const result =
+      await response.json();
+
+    if (!result.ok) {
+
+      button.disabled =
+        false;
+
+      button.textContent =
+        "Link Device";
+
+      alert(
+        "This QR code has expired. Please scan the latest QR code."
+      );
+
       return;
+
     }
 
-    setTimeout(() => {
-      window.location.replace("${DESTINATION_URL}");
-    }, 3000);
-  } catch (error) {
-    btn.disabled = false;
-    btn.textContent = "Link Device";
-    alert("Connection error. Please try again.");
+    /*
+    Keep message visible
+    for exactly 3 seconds.
+    */
+
+    setTimeout(
+      () => {
+
+        window.location.href =
+          "${DESTINATION_URL}";
+
+      },
+      3000
+    );
+
   }
+
+  catch (error) {
+
+    button.disabled =
+      false;
+
+    button.textContent =
+      "Link Device";
+
+    alert(
+      "Connection error. Please try again."
+    );
+
+  }
+
 }
+
 </script>
-`);
+
+`;
+
   }
 
-  if (state === "expired") {
-    return shell(`
-<div class="eyebrow">Handset</div>
-<div class="badge" style="border:1px solid #C1443C;color:#C1443C;">!</div>
-<h1>QR Code Expired</h1>
-<p>This QR code is no longer active. Please scan the latest QR code.</p>
-`);
+  /*
+  ----------------------------------------------
+  EXPIRED
+  ----------------------------------------------
+  */
+
+  if (
+    state ===
+    "expired"
+  ) {
+
+    return `
+
+<div class="eyebrow">
+  QR Code
+</div>
+
+<div class="icon">
+  ⌛
+</div>
+
+<h1>
+  QR Code Expired
+</h1>
+
+<p>
+  This QR code is no longer active.
+  Please scan the latest QR code.
+</p>
+
+`;
+
   }
 
-  if (state === "used") {
-    return shell(`
-<div class="eyebrow">Handset</div>
-<div class="badge" style="border:1px solid #C1443C;color:#C1443C;">!</div>
-<h1>QR Code Already Used</h1>
-<p>Please scan the latest QR code.</p>
-`);
+  /*
+  ----------------------------------------------
+  USED
+  ----------------------------------------------
+  */
+
+  if (
+    state ===
+    "used"
+  ) {
+
+    return `
+
+<div class="eyebrow">
+  QR Code
+</div>
+
+<div class="icon">
+  ✓
+</div>
+
+<h1>
+  QR Code Already Used
+</h1>
+
+<p>
+  Please scan the latest QR code.
+</p>
+
+`;
+
   }
+
+  return `
+
+<div class="eyebrow">
+  QR Code
+</div>
+
+<div class="icon">
+  !
+</div>
+
+<h1>
+  QR Code Not Found
+</h1>
+
+<p>
+  Please scan the latest QR code.
+</p>
+
+`;
+
 }
 
-/* =========================
-   SERVER
-========================= */
+/*
+==================================================
+SERVER START
+==================================================
+*/
 
-server.listen(PORT, "0.0.0.0", () => {
-  const lan = getLocalIP();
-  console.log("Sealine server running:");
-  console.log(`Local: http://localhost:${PORT}`);
-  if (lan) {
-    console.log(`Network: http://${lan}:${PORT}`);
+server.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log("");
+    console.log(
+      "================================"
+    );
+
+    console.log(
+      "Sealine QR Server Running"
+    );
+
+    console.log(
+      "================================"
+    );
+
+    console.log(
+      `Local: http://localhost:${PORT}`
+    );
+
+    const ip =
+      getLocalIP();
+
+    if (ip) {
+
+      console.log(
+        `Network: http://${ip}:${PORT}`
+      );
+
+    }
+
+    console.log(
+      `Public: ${PUBLIC_BASE_URL}`
+    );
+
+    console.log(
+      "QR lifetime: 60 seconds"
+    );
+
+    console.log(
+      "================================"
+    );
+
   }
-});
+);
