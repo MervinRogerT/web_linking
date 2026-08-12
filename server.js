@@ -74,19 +74,27 @@ io.on("connection", (socket) => {
   let rotateTimer = null;
 
   async function issueNewSession() {
-    if (currentSessionId) {
-      sessions.delete(currentSessionId);
+    // 1. Clear any running timer first to prevent memory leaks and premature deletion
+    if (rotateTimer) {
+      clearTimeout(rotateTimer);
+      rotateTimer = null;
     }
 
-    clearTimeout(rotateTimer);
+    // 2. Clean up previous session room & memory
+    if (currentSessionId) {
+      socket.leave(currentSessionId);
+      sessions.delete(currentSessionId);
+      currentSessionId = null;
+    }
 
-    const {
-      sessionId,
-      qrDataUrl,
-      expiresAt
-    } = await createSession(socket.id);
+    if (!socket.connected) return;
 
+    // 3. Create new session
+    const { sessionId, qrDataUrl, expiresAt } = await createSession(socket.id);
     currentSessionId = sessionId;
+
+    // 4. Join Socket.IO Room for this session ID
+    socket.join(sessionId);
 
     socket.emit("session", {
       sessionId,
@@ -94,10 +102,11 @@ io.on("connection", (socket) => {
       expiresAt
     });
 
+    // 5. Set expiration timer
     rotateTimer = setTimeout(async () => {
-      sessions.delete(sessionId);
-
       if (currentSessionId === sessionId) {
+        sessions.delete(sessionId);
+        socket.leave(sessionId);
         currentSessionId = null;
         await issueNewSession();
       }
@@ -109,19 +118,19 @@ io.on("connection", (socket) => {
   });
 
   socket.on("unlink", () => {
+    if (rotateTimer) clearTimeout(rotateTimer);
     if (currentSessionId) {
+      socket.leave(currentSessionId);
       sessions.delete(currentSessionId);
+      currentSessionId = null;
     }
-
-    currentSessionId = null;
-    clearTimeout(rotateTimer);
   });
 
   socket.on("disconnect", () => {
-    clearTimeout(rotateTimer);
-
+    if (rotateTimer) clearTimeout(rotateTimer);
     if (currentSessionId) {
       sessions.delete(currentSessionId);
+      currentSessionId = null;
     }
   });
 });
@@ -139,7 +148,6 @@ app.get("/link/:sessionId", (req, res) => {
 
   if (Date.now() > session.expiresAt) {
     sessions.delete(req.params.sessionId);
-
     return res.status(410).send(phonePage("expired"));
   }
 
@@ -155,7 +163,8 @@ app.get("/link/:sessionId", (req, res) => {
 ========================= */
 
 app.post("/link/:sessionId/confirm", (req, res) => {
-  const session = sessions.get(req.params.sessionId);
+  const { sessionId } = req.params;
+  const session = sessions.get(sessionId);
 
   if (!session) {
     return res.status(410).json({
@@ -165,7 +174,7 @@ app.post("/link/:sessionId/confirm", (req, res) => {
   }
 
   if (Date.now() > session.expiresAt) {
-    sessions.delete(req.params.sessionId);
+    sessions.delete(sessionId);
 
     return res.status(410).json({
       ok: false,
@@ -182,8 +191,9 @@ app.post("/link/:sessionId/confirm", (req, res) => {
 
   session.status = "used";
 
-  io.to(session.webSocketId).emit("linked", {
-    sessionId: req.params.sessionId,
+  // Emit event to the socket room named after the sessionId
+  io.to(sessionId).emit("linked", {
+    sessionId: sessionId,
     linkedAt: Date.now()
   });
 
@@ -200,317 +210,134 @@ function phonePage(state, sessionId) {
   const shell = (content) => `
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
 <meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
->
-
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sealine</title>
-
 <style>
-
 body {
   margin: 0;
   min-height: 100vh;
-
   display: flex;
   align-items: center;
   justify-content: center;
-
-  background:
-  radial-gradient(
-    120% 140% at 50% -10%,
-    #123447 0%,
-    #0B1B2B 45%,
-    #071320 100%
-  );
-
-  font-family:
-  -apple-system,
-  BlinkMacSystemFont,
-  "Segoe UI",
-  sans-serif;
-
+  background: radial-gradient(120% 140% at 50% -10%, #123447 0%, #0B1B2B 45%, #071320 100%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #EDE7D9;
-
   padding: 24px;
 }
-
 .card {
   max-width: 360px;
   width: 100%;
-
   text-align: center;
-
   background: rgba(237,231,217,0.05);
-
-  border:
-  1px solid rgba(237,231,217,0.14);
-
+  border: 1px solid rgba(237,231,217,0.14);
   border-radius: 18px;
-
   padding: 34px 26px;
 }
-
 .eyebrow {
   font-size: 11px;
-
   letter-spacing: .18em;
-
   text-transform: uppercase;
-
   color: #E3B23C;
-
   margin-bottom: 10px;
 }
-
 .badge {
   width: 60px;
   height: 60px;
-
   margin: 0 auto 18px;
-
   border-radius: 50%;
-
   display: flex;
-
   align-items: center;
   justify-content: center;
-
   font-size: 26px;
 }
-
 h1 {
   font-size: 19px;
-
-  margin:
-  0 0 8px;
-
+  margin: 0 0 8px;
   font-weight: 600;
 }
-
 p {
   font-size: 13.5px;
-
-  color:
-  rgba(237,231,217,0.65);
-
+  color: rgba(237,231,217,0.65);
   line-height: 1.5;
-
-  margin:
-  0 0 22px;
+  margin: 0 0 22px;
 }
-
 button {
   width: 100%;
-
   padding: 13px;
-
   border-radius: 10px;
-
-  border:
-  1px solid #C9A227;
-
+  border: 1px solid #C9A227;
   background: #C9A227;
-
   color: #071320;
-
   font-weight: 600;
-
   font-size: 14px;
 }
-
 button:disabled {
   opacity: 0.5;
 }
-
 </style>
-
 </head>
-
 <body>
-
 <div class="card">
-
 ${content}
-
 </div>
-
 </body>
-
 </html>
 `;
 
-  /* =====================
-     CONFIRM PAGE
-  ===================== */
-
   if (state === "confirm") {
     return shell(`
-
-<div class="eyebrow">
-  Handset
-</div>
-
-<div
-class="badge"
-style="
-border:1px solid #C9A227;
-color:#E3B23C;
-"
->
-🔗
-</div>
-
-<h1>
-Continue
-</h1>
-
-<p>
-Tap the button below to continue.
-</p>
-
-<button
-id="confirmBtn"
-onclick="continueToWebsite()"
->
-Link Device
-</button>
-
+<div class="eyebrow">Handset</div>
+<div class="badge" style="border:1px solid #C9A227;color:#E3B23C;">🔗</div>
+<h1>Continue</h1>
+<p>Tap the button below to continue.</p>
+<button id="confirmBtn" onclick="continueToWebsite()">Link Device</button>
 <script>
-
 async function continueToWebsite() {
-
-  const btn =
-  document.getElementById("confirmBtn");
-
+  const btn = document.getElementById("confirmBtn");
   btn.disabled = true;
-
-  btn.textContent =
-  "Your account is linking...";
+  btn.textContent = "Your account is linking...";
 
   try {
-
-    const response =
-    await fetch(
-      "/link/${sessionId}/confirm",
-      {
-        method: "POST"
-      }
-    );
-
-    const data =
-    await response.json();
+    const response = await fetch("/link/${sessionId}/confirm", { method: "POST" });
+    const data = await response.json();
 
     if (!data.ok) {
-
       btn.disabled = false;
-
-      btn.textContent =
-      "Link Device";
-
-      alert(
-        "QR code expired. Please scan the latest QR code."
-      );
-
+      btn.textContent = "Link Device";
+      alert("QR code expired. Please scan the latest QR code.");
       return;
     }
 
     setTimeout(() => {
-
-      window.location.replace(
-        "${DESTINATION_URL}"
-      );
-
+      window.location.replace("${DESTINATION_URL}");
     }, 3000);
-
   } catch (error) {
-
     btn.disabled = false;
-
-    btn.textContent =
-    "Link Device";
-
-    alert(
-      "Connection error. Please try again."
-    );
-
+    btn.textContent = "Link Device";
+    alert("Connection error. Please try again.");
   }
-
 }
-
 </script>
-
 `);
   }
-
-  /* =====================
-     EXPIRED
-  ===================== */
 
   if (state === "expired") {
     return shell(`
-
-<div class="eyebrow">
-  Handset
-</div>
-
-<div
-class="badge"
-style="
-border:1px solid #C1443C;
-color:#C1443C;
-"
->
-!
-</div>
-
-<h1>
-QR Code Expired
-</h1>
-
-<p>
-This QR code is no longer active.
-Please scan the latest QR code.
-</p>
-
+<div class="eyebrow">Handset</div>
+<div class="badge" style="border:1px solid #C1443C;color:#C1443C;">!</div>
+<h1>QR Code Expired</h1>
+<p>This QR code is no longer active. Please scan the latest QR code.</p>
 `);
   }
 
-  /* =====================
-     USED
-  ===================== */
-
   if (state === "used") {
     return shell(`
-
-<div class="eyebrow">
-  Handset
-</div>
-
-<div
-class="badge"
-style="
-border:1px solid #C1443C;
-color:#C1443C;
-"
->
-!
-</div>
-
-<h1>
-QR Code Already Used
-</h1>
-
-<p>
-Please scan the latest QR code.
-</p>
-
+<div class="eyebrow">Handset</div>
+<div class="badge" style="border:1px solid #C1443C;color:#C1443C;">!</div>
+<h1>QR Code Already Used</h1>
+<p>Please scan the latest QR code.</p>
 `);
   }
 }
@@ -519,28 +346,11 @@ Please scan the latest QR code.
    SERVER
 ========================= */
 
-server.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-
-    const lan = getLocalIP();
-
-    console.log(
-      "Sealine server running:"
-    );
-
-    console.log(
-      `Local: http://localhost:${PORT}`
-    );
-
-    if (lan) {
-
-      console.log(
-        `Network: http://${lan}:${PORT}`
-      );
-
-    }
-
+server.listen(PORT, "0.0.0.0", () => {
+  const lan = getLocalIP();
+  console.log("Sealine server running:");
+  console.log(`Local: http://localhost:${PORT}`);
+  if (lan) {
+    console.log(`Network: http://${lan}:${PORT}`);
   }
-);
+});
