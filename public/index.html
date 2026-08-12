@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sealine — Bridge Console</title>
+<style>
+  :root{
+    --ink:#0B1B2B; --ink-deep:#071320; --teal:#123447; --paper:#EDE7D9;
+    --brass:#C9A227; --brass-bright:#E3B23C; --ok:#5FA88A; --line:rgba(237,231,217,0.14);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;
+    background:radial-gradient(120% 140% at 50% -10%, var(--teal) 0%, var(--ink) 45%, var(--ink-deep) 100%);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; color:var(--paper);
+  }
+  .stage{width:100%; max-width:420px;}
+  .wordmark{text-align:center; font-size:26px; font-weight:700; letter-spacing:.02em; margin-bottom:2px;}
+  .wordmark em{font-style:normal; color:var(--brass-bright);}
+  .subtag{text-align:center; font-size:11px; letter-spacing:.2em; text-transform:uppercase;
+    color:rgba(237,231,217,.5); margin-bottom:26px;}
+  .card{background:rgba(237,231,217,0.05); border:1px solid var(--line); border-radius:18px; padding:32px 26px;}
+  .ring-wrap{position:relative; width:236px; height:236px; margin:0 auto 20px;}
+  .ring-wrap svg{position:absolute; inset:0; transform:rotate(-90deg);}
+  .ring-track{fill:none; stroke:rgba(237,231,217,.1); stroke-width:3;}
+  .ring-progress{fill:none; stroke:var(--brass-bright); stroke-width:3; stroke-linecap:round; transition:stroke-dashoffset .2s linear;}
+  .qr-frame{position:absolute; inset:20px; background:var(--paper); border-radius:12px; overflow:hidden;
+    display:flex; align-items:center; justify-content:center;}
+  .qr-frame img{width:100%; height:100%; object-fit:contain;}
+  .countdown-badge{position:absolute; bottom:-8px; left:50%; transform:translateX(-50%); background:var(--ink);
+    border:1px solid var(--brass); border-radius:20px; padding:4px 14px; font-size:12px; color:var(--brass-bright); white-space:nowrap;}
+  .headline{text-align:center; font-size:19px; font-weight:600; margin:0 0 22px;}
+  .status-line{text-align:center; font-size:13px; color:rgba(237,231,217,.6); display:flex; align-items:center; justify-content:center; gap:8px;}
+  .status-line.err{color:#e08a83;}
+  .dot{width:6px; height:6px; border-radius:50%; background:var(--brass-bright); animation:pulse 1.6s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.25;}}
+  .linked-panel{text-align:center; display:none;}
+  .check-badge{width:60px; height:60px; margin:0 auto 16px; border-radius:50%; border:1px solid var(--ok);
+    display:flex; align-items:center; justify-content:center; color:var(--ok); font-size:24px;}
+  .linked-title{font-size:19px; font-weight:600; margin-bottom:6px;}
+  .linked-sub{font-size:13px; color:rgba(237,231,217,.6); margin-bottom:20px;}
+  .session-meta{text-align:left; background:rgba(11,27,43,.4); border:1px solid var(--line); border-radius:10px;
+    padding:14px 16px; font-family:monospace; font-size:12px; line-height:2; color:rgba(237,231,217,.75);}
+  .session-meta b{color:var(--paper);}
+  .new-link-btn{margin-top:18px; width:100%; padding:12px; border-radius:10px; border:1px solid var(--line);
+    background:transparent; color:rgba(237,231,217,.6); font-size:12.5px; cursor:pointer;}
+  .new-link-btn:hover{border-color:var(--brass); color:var(--paper);}
+  .pending-panel{}
+  .footer-note{text-align:center; margin-top:16px; font-size:11px; color:rgba(237,231,217,.32);}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="wordmark">SEA<em>LINE</em></div>
+  <div class="subtag">bridge console</div>
+  <div class="card">
+    <div id="pendingPanel" class="pending-panel">
+      <div class="headline">Scan with your handset<br>to connect Sealine</div>
+      <div class="ring-wrap">
+        <svg viewBox="0 0 236 236">
+          <circle class="ring-track" cx="118" cy="118" r="112"/>
+          <circle id="ringProgress" class="ring-progress" cx="118" cy="118" r="112" stroke-dasharray="703.7" stroke-dashoffset="0"/>
+        </svg>
+        <div class="qr-frame"><img id="qrImg" alt="Sealine link QR code"></div>
+        <div class="countdown-badge">refreshes in <span id="countdownNum">60</span>s</div>
+      </div>
+      <div id="statusLine" class="status-line"><span class="dot"></span><span id="statusText">connecting to server…</span></div>
+    </div>
+
+    <div id="linkedPanel" class="linked-panel">
+      <div class="check-badge">&#10003;</div>
+      <div class="linked-title">Connected</div>
+      <div class="linked-sub">Both sessions are now active.</div>
+      <div class="session-meta">
+        <div>app &nbsp;&nbsp;&nbsp;<b>sealine</b></div>
+        <div>linked &nbsp;&nbsp;<b id="metaTime">—</b></div>
+      </div>
+      <button class="new-link-btn" onclick="startNewLink()">End this link &amp; start a new code</button>
+    </div>
+  </div>
+  <div class="footer-note">Scan the QR code with any phone to open the website.</div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const RING_C = 703.7;
+  const socket = io();
+
+  let expiresAt = null;
+  let tickTimer = null;
+
+  const pendingPanel = document.getElementById('pendingPanel');
+  const linkedPanel = document.getElementById('linkedPanel');
+  const statusLine = document.getElementById('statusLine');
+  const statusText = document.getElementById('statusText');
+
+  function showPending(){
+    pendingPanel.style.display = 'block';
+    linkedPanel.style.display = 'none';
+  }
+  function showLinked(linkedAt){
+    pendingPanel.style.display = 'none';
+    linkedPanel.style.display = 'block';
+    document.getElementById('metaTime').textContent = new Date(linkedAt).toLocaleTimeString();
+  }
+
+  function startNewLink(){
+    showPending();
+    statusText.textContent = 'requesting a new code…';
+    socket.emit('start', { baseUrl: window.location.origin });
+  }
+
+  socket.on('connect', () => {
+    statusText.textContent = 'requesting code…';
+    socket.emit('start', { baseUrl: window.location.origin });
+  });
+
+  socket.on('disconnect', () => {
+    statusLine.classList.add('err');
+    statusText.textContent = 'disconnected from server — reconnecting…';
+    clearInterval(tickTimer);
+  });
+
+  socket.on('session', ({ qrDataUrl, expiresAt: exp }) => {
+    statusLine.classList.remove('err');
+    statusText.textContent = 'waiting for handset';
+    document.getElementById('qrImg').src = qrDataUrl;
+    expiresAt = exp;
+    clearInterval(tickTimer);
+    tickTimer = setInterval(tick, 150);
+    tick();
+  });
+
+  socket.on('linked', ({ linkedAt }) => {
+    clearInterval(tickTimer);
+    showLinked(linkedAt);
+  });
+
+  function tick(){
+    if(!expiresAt) return;
+    const remaining = Math.max(0, expiresAt - Date.now());
+    const frac = remaining / 60000;
+    document.getElementById('ringProgress').setAttribute('stroke-dashoffset', String(RING_C * (1 - frac)));
+    document.getElementById('countdownNum').textContent = Math.ceil(remaining / 1000);
+  }
+
+  document.getElementById('hostHint').textContent = 'public QR';
+</script>
+</body>
+</html>

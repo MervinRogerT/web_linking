@@ -1,0 +1,14 @@
+{
+  "name": "sealine-link",
+  "version": "1.0.0",
+  "description": "Sealine QR device-linking server: web bridge console + phone handset confirmation, real-time over Socket.IO",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.7.5"
+  }
+}
